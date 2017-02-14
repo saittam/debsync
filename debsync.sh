@@ -54,6 +54,23 @@ raw_package_name=$(jq_safe -r '
                (.name | endswith("amd64.deb")))) |
     .[0].name' < "${release_json}")
 safe_package_name=$(echo "${raw_package_name}" | tr -d -c '[a-zA-Z0-9._\-]')
+package_repo_file="${package_repo}/amd64/${safe_package_name}"
+
+# Obtain the asset update timestamp.
+asset_updated_at=$(jq_safe -r --arg name "${raw_package_name}" '
+    .assets | map(select(.name == $name)) | .[0].updated_at
+    ' < "${release_json}")
+
+# If the package file already exists, check whether it's been updated since
+# we've last downloaded it.
+if test -f "${package_repo_file}"; then
+  asset_timestamp=$(date -d "${asset_updated_at}" '+%s')
+  package_file_mtime=$(stat --format="%Y" "${package_repo_file}")
+  if test "${asset_timestamp}" -le "${package_file_mtime}"; then
+    # We already have this version, nothing to do.
+    exit 0
+  fi
+fi
 
 # Find the asset URLs corresponding to the debian package and its signature.
 package_asset_url=$(jq_safe -r --arg name "${raw_package_name}" '
@@ -76,9 +93,10 @@ silence gpg --no-verbose --batch --quiet --no-tty \
     --no-default-keyring --keyring "${debsync_base}/coreos.gpg" --always-trust \
     --verify "${signature_file}" "${package_file}"
 
-# Move downloaded file to local package repository.
+# Move downloaded file to local package repository and set correct timestamp.
 mkdir -p "${package_repo}/amd64"
-mv "${package_file}" "${package_repo}/amd64/${safe_package_name}"
+mv "${package_file}" "${package_repo_file}"
+touch -m -d "${asset_updated_at}" "${package_repo_file}"
 
-# Update packages file.
+# Update packages index.
 (cd "${package_repo}" && silence dpkg-scanpackages -m . > "Packages")
